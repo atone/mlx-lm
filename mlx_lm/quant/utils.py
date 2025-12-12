@@ -1,7 +1,7 @@
 # Copyright © 2025 Apple Inc.
 
 from pathlib import Path
-
+from datasets import load_dataset
 import mlx.core as mx
 
 
@@ -24,3 +24,49 @@ def load_data(tokenizer, num_samples: int, sequence_length: int) -> mx.array:
     if num_samples > 0:
         segments = segments[:num_samples]
     return tokens[segments]
+
+
+def load_audio_data(
+    data: str,
+    num_samples: int,
+    sequence_length: int,
+    split="validation",
+):
+    dataset = load_dataset(data, split=split)
+    dataset = dataset.shuffle(seed=42)
+
+    dataset = dataset.select_columns(
+        ["text_ids", "speak_ids", "listen_ids"]
+    )
+
+    input_list = []
+    speak_list = []
+    listen_list = []
+    max_input_len = 4096
+    for data in dataset:
+        input_list.append(mx.array(data["text_ids"])[:, :max_input_len])
+        speak_list.append(mx.array(data["speak_ids"])[:, :max_input_len])
+        listen_list.append(mx.array(data["listen_ids"])[:, :max_input_len])
+
+    input_ids = mx.concat(input_list, axis=1)
+    speak_ids = mx.concat(speak_list, axis=1)
+    listen_ids = mx.concat(listen_list, axis=1)
+
+    n_split = input_ids.shape[1] // sequence_length
+    print(f" * Split into {n_split} blocks")
+
+    input_list = [
+        input_ids[:, i * sequence_length : (i + 1) * sequence_length] for i in range(n_split) if i < num_samples
+    ]
+    speak_list = [
+        speak_ids[:, i * sequence_length : (i + 1) * sequence_length] for i in range(n_split) if i < num_samples
+    ]
+    listen_list = [
+        listen_ids[:, i * sequence_length : (i + 1) * sequence_length] for i in range(n_split) if i < num_samples
+    ]
+
+    return {
+        "text_ids": mx.concat(input_list, axis=0),
+        "speak_ids": mx.concat(speak_list, axis=0),
+        "listen_ids": mx.concat(listen_list, axis=0),
+    }

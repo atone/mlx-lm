@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from mlx_lm.models.base import create_attention_mask
 from mlx_lm.models.switch_layers import SwitchLinear
-from mlx_lm.quant.utils import load_data
+from mlx_lm.quant.utils import load_data, load_audio_data
 from mlx_lm.utils import (
     load,
     save,
@@ -148,6 +148,7 @@ AWQ_MODEL_CONFIGS = {
     "gemma3_text": gemma3_text_awq,
     "gemma3": update(gemma3_text_awq, lm_key="language_model"),
     "deepseek_v2": deepseek_v2_awq,
+    "FLMAudio": llama_awq,
 }
 
 
@@ -398,7 +399,7 @@ def clip_block(
 
 def awq_quantize(
     model,
-    inputs: mx.array,
+    inputs: dict[str, mx.array] | mx.array,
     awq_config: AWQConfig,
     group_size: int = 64,
     bits: int = 3,
@@ -415,13 +416,25 @@ def awq_quantize(
         wq = mx.quantize(w, bits=bits, group_size=group_size)
         return mx.dequantize(*wq, bits=bits, group_size=group_size)
 
-    mask = create_attention_mask(inputs)
+    if isinstance(inputs, dict):
+        mask = create_attention_mask(inputs["text_ids"])
+    else:
+        mask = create_attention_mask(inputs)
 
     embed_key = awq_config.embed
-    model.model[embed_key] = model.model[embed_key].to_quantized(
-        group_size=embed_group_size, bits=embed_bits
-    )
-    inputs = model.model[embed_key](inputs)
+
+    if isinstance(model.model[embed_key], nn.Embedding):
+        model.model[embed_key] = model.model[embed_key].to_quantized(
+            group_size=embed_group_size, bits=embed_bits
+        )
+    else:
+        nn.quantize(
+            model.model[embed_key], group_size=embed_group_size, bits=embed_bits
+        )
+    if isinstance(inputs, dict):
+        inputs = model.model[embed_key](**inputs)
+    else:
+        inputs = model.model[embed_key](inputs)
 
     def capture(module):
         if not isinstance(module, (nn.Linear, SwitchLinear)):
@@ -536,6 +549,7 @@ def main():
         "--model", "-m", default="mlx-community/Qwen2.5-7B-Instruct-bf16"
     )
     parser.add_argument("--mlx-path", default="mlx_model")
+    parser.add_argument("--data-path", type=str, default=None)
     parser.add_argument("--bits", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=64)
     parser.add_argument("--embed-bits", type=int, default=4)
@@ -560,7 +574,16 @@ def main():
     if (awq_config := AWQ_MODEL_CONFIGS.get(model_type, None)) is None:
         raise NotImplementedError(f"AWQ support for {model_type} models NYI.")
 
-    calibration_data = load_data(tokenizer, args.num_samples, args.sequence_length)
+    if model_type == "FLMAudio":
+        assert args.data_path is not None, "Data path must be specified for FLMAudio."
+        calibration_data = load_audio_data(
+            data=args.data_path,
+            num_samples=num_samples,
+            sequence_length=args.sequence_length,
+            split="validation",
+        )
+    else:
+        calibration_data = load_data(tokenizer, args.num_samples, args.sequence_length)
 
     calibration_data = dist_split(calibration_data, group)
 
@@ -583,3 +606,6 @@ def main():
         tokenizer,
         config,
     )
+
+if __name__ == "__main__":
+    main()
